@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>WebUSB DFU Tool</title>
+    <link rel="stylesheet" href="styles.css?v=2.0">
+</head>
+<body>
+    <div id="theme-switcher">
+        <button class="theme-btn active" data-theme="light" title="Light Theme" aria-label="Light Theme">☀️<span class="sr-only">Light Theme</span></button>
+        <button class="theme-btn" data-theme="dark" title="Dark Theme" aria-label="Dark Theme">🌙<span class="sr-only">Dark Theme</span></button>
+    </div>
+    <div>
+        <h2>⚡ WebUSB DFU</h2>
+        <p><small>Universal DFU Tool | 1.Connect 2.Select firmware 3.Download</small></p>
+        <button id="c">🔌 Connect to Device</button>
+        <button id="t" class="detach-btn" aria-label="Detach and switch to DFU mode">🔀 Detach (Switch to DFU Mode)</button>
+        <div id="info"></div>
+        <div id="addr-row" style="display:none;gap:16px;margin:16px 0">
+            <div style="flex:1">
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">📍 Target Address (DFU-Se)</label>
+                <input type="text" id="a" placeholder="0x08002000" value="0x08002000" style="margin:0">
+            </div>
+        </div>
+        <div style="display:flex;gap:16px;margin:16px 0">
+            <div style="flex:1">
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">📦 Firmware File</label>
+                <input type="file" id="f" accept=".bin,.dfu" style="margin:0">
+            </div>
+        </div>
+        <button id="d" disabled>⬇️ Download Firmware</button>
+        <div id="p"><div id="b">0%</div></div>
+        <div id="l"></div>
+    </div>
+    
+    <script src="dfu.js?v=2.0"></script>
+    <script src="app.js?v=2.0"></script>
+</body>
+</html>
