@@ -1,0 +1,19 @@
+{
+  "files": [
+    {
+      "name": "gdp_blackmagic_72m.bin",
+      "path": "fw/gdp_blackmagic_72m.bin",
+      "label": "gdp_blackmagic_72m.bin"
+    },
+    {
+      "name": "gdp_cherrydap_72m.bin",
+      "path": "fw/gdp_cherrydap_72m.bin",
+      "label": "gdp_cherrydap_72m.bin"
+    },
+    {
+      "name": "gdp_osbdm_eppc_72m.bin",
+      "path": "fw/gdp_osbdm_eppc_72m.bin",
+      "label": "gdp_osbdm_eppc_72m.bin"
+    }
+  ]
+}

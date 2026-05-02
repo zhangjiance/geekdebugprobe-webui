@@ -10,6 +10,11 @@ const KNOWN_DFUSE_DEVICES = new Set([
 const cb = document.getElementById('c');
 const tb = document.getElementById('t');
 const db = document.getElementById('d');
+const fwSourceTabs = Array.from(document.querySelectorAll('.fw-source-tab'));
+const fwRow = document.getElementById('fw-row');
+const uploadRow = document.getElementById('upload-row');
+const fwList = document.getElementById('fw-list');
+const fwToggle = document.getElementById('fw-toggle');
 const fi = document.getElementById('f');
 const ai = document.getElementById('a');
 const addrRow = document.getElementById('addr-row');
@@ -21,6 +26,11 @@ const writeWrap = document.getElementById('p-write');
 const pc = document.getElementById('p');
 const pb = document.getElementById('b');
 const lg = document.getElementById('l');
+let fwManifest = [];
+let fwManifestWarningShown = false;
+let firmwareSourceMode = 'fw-list';
+let selectedFwPath = '';
+let fwListExpanded = false;
 
 function log(msg, isError) {
     const div = document.createElement('div');
@@ -135,6 +145,207 @@ function isAddressInsideImage(address, imageBase, imageSize) {
 function clearDeviceInfo() {
     infoBox.textContent = '';
     infoBox.style.display = 'none';
+}
+
+function updateDownloadButtonState() {
+    db.disabled = (dev === null || isRuntimeMode || needsReconnectAfterDetach || fw === null);
+}
+
+function clearLoadedFirmware() {
+    fw = null;
+    updateDownloadButtonState();
+}
+
+function normalizeFwPath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function buildResourceUrl(path) {
+    return new URL(normalizeFwPath(path), window.location.href);
+}
+
+async function loadFirmwareFromFwList() {
+    const selected = selectedFwPath;
+    if (!selected) {
+        log('⚠️ Please select a firmware from fw list.');
+        return;
+    }
+
+    const filePath = normalizeFwPath(selected);
+    if (!filePath.startsWith('fw/')) {
+        log('❌ Invalid fw path in manifest: ' + filePath, true);
+        return;
+    }
+
+    log('🔄 Loading firmware from fw list: ' + filePath + '...');
+
+    try {
+        const fwUrl = buildResourceUrl(filePath);
+        fwUrl.searchParams.set('v', Date.now().toString());
+        const response = await fetch(fwUrl.toString(), { cache: 'no-store' });
+        if (!response.ok) {
+            throw new Error('HTTP ' + response.status + ' while fetching ' + filePath);
+        }
+
+        const buffer = await response.arrayBuffer();
+        if (!buffer || buffer.byteLength === 0) {
+            throw new Error('Firmware file is empty');
+        }
+
+        fw = buffer;
+        selectedFwPath = filePath;
+        renderFwList();
+        log('✅ Loaded from fw list: ' + filePath + ' (' + (buffer.byteLength / 1024).toFixed(1) + 'KB, ' + buffer.byteLength + ' bytes)');
+        updateDownloadButtonState();
+    } catch (error) {
+        clearLoadedFirmware();
+        log('❌ Failed to load fw list firmware: ' + formatErrorMessage(error), true);
+    }
+}
+
+function renderFwList() {
+    while (fwList.firstChild) {
+        fwList.removeChild(fwList.firstChild);
+    }
+
+    if (!Array.isArray(fwManifest) || fwManifest.length === 0) {
+        const none = document.createElement('div');
+        none.className = 'fw-empty';
+        none.textContent = 'No firmware found in fw/manifest.json';
+        fwList.appendChild(none);
+        fwToggle.style.display = 'none';
+        return;
+    }
+
+    const visibleCount = fwListExpanded ? fwManifest.length : Math.min(4, fwManifest.length);
+    for (let i = 0; i < visibleCount; i++) {
+        const entry = fwManifest[i];
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fw-item';
+        const isActive = entry.path === selectedFwPath;
+        if (isActive) {
+            btn.classList.add('active');
+        }
+
+        if (isActive) {
+            const badge = document.createElement('span');
+            badge.className = 'fw-item-badge';
+            badge.textContent = 'Selected';
+            btn.appendChild(badge);
+        }
+
+        const main = document.createElement('span');
+        main.className = 'fw-item-main';
+        const displayName = entry.label || entry.name || entry.path;
+        main.textContent = displayName;
+
+        const meta = document.createElement('span');
+        meta.className = 'fw-item-meta';
+        const shortPath = normalizeFwPath(entry.path).replace(/^fw\//i, '');
+        meta.textContent = shortPath;
+
+        // Browser-native tooltip shows full name/path when text is truncated.
+        btn.title = `${displayName}\n${normalizeFwPath(entry.path)}`;
+
+        btn.appendChild(main);
+        btn.appendChild(meta);
+        btn.addEventListener('click', async () => {
+            selectedFwPath = entry.path;
+            clearLoadedFirmware();
+            renderFwList();
+            await loadFirmwareFromFwList();
+        });
+        fwList.appendChild(btn);
+    }
+
+    if (fwManifest.length > 4) {
+        fwToggle.style.display = 'block';
+        fwToggle.textContent = fwListExpanded ? 'Collapse' : `Show ${fwManifest.length - 4} more`;
+    } else {
+        fwToggle.style.display = 'none';
+    }
+}
+
+async function loadFwManifest(showErrors) {
+    if (window.location.protocol === 'file:') {
+        fwManifest = [];
+        renderFwList();
+        if (showErrors && !fwManifestWarningShown) {
+            log('⚠️ Current page is opened via file://. Browser security blocks manifest loading. Please run a local web server and open via http://localhost/...', true);
+            fwManifestWarningShown = true;
+        }
+        return;
+    }
+
+    try {
+        const manifestUrl = buildResourceUrl('fw/manifest.json');
+        manifestUrl.searchParams.set('v', Date.now().toString());
+        const response = await fetch(manifestUrl.toString(), { cache: 'no-store' });
+        if (!response.ok) {
+            throw new Error('HTTP ' + response.status);
+        }
+
+        const payload = await response.json();
+        const files = Array.isArray(payload.files) ? payload.files : [];
+        fwManifest = files
+            .map(item => {
+                if (typeof item === 'string') {
+                    const name = item.split('/').pop();
+                    return { path: normalizeFwPath(item), name, label: name };
+                }
+
+                const path = normalizeFwPath(item.path || '');
+                const name = item.name || path.split('/').pop();
+                const label = item.label || name;
+                return { path, name, label };
+            })
+            .filter(item => item.path.startsWith('fw/') && item.path.toLowerCase().endsWith('.bin'));
+
+        if (fwManifest.length > 0 && !selectedFwPath) {
+            selectedFwPath = fwManifest[0].path;
+            clearLoadedFirmware();
+            await loadFirmwareFromFwList();
+        } else {
+            renderFwList();
+        }
+        log('✅ Loaded fw firmware list (' + fwManifest.length + ' item' + (fwManifest.length === 1 ? '' : 's') + ').');
+        fwManifestWarningShown = false;
+    } catch (error) {
+        fwManifest = [];
+        selectedFwPath = '';
+        renderFwList();
+        if (showErrors && !fwManifestWarningShown) {
+            log('⚠️ Could not load fw/manifest.json (' + formatErrorMessage(error) + '). Check server path and that fw/manifest.json is publicly accessible.', true);
+            fwManifestWarningShown = true;
+        }
+    }
+}
+
+function setFirmwareSourceMode(mode) {
+    firmwareSourceMode = mode;
+    fwSourceTabs.forEach(tab => {
+        if (tab.dataset.source === mode) {
+            tab.classList.add('active');
+        } else {
+            tab.classList.remove('active');
+        }
+    });
+
+    updateFirmwareSourceUI();
+}
+
+function updateFirmwareSourceUI() {
+    const useFwList = firmwareSourceMode === 'fw-list';
+    uploadRow.style.display = useFwList ? 'none' : 'flex';
+    fwRow.style.display = useFwList ? 'flex' : 'none';
+
+    clearLoadedFirmware();
+    if (!useFwList) {
+        selectedFwPath = '';
+        fwListExpanded = false;
+        renderFwList();
+    }
 }
 
 function resetProgressBars() {
@@ -535,7 +746,7 @@ cb.addEventListener('click', async () => {
             cb.disabled = true;
             tb.style.display = 'none';
             tb.disabled = true;
-            db.disabled = (fw === null);
+            updateDownloadButtonState();
             if (needsReconnectAfterDetach) {
                 needsReconnectAfterDetach = false;
                 log('✅ Reconnected in DFU mode, ready to download.');
@@ -572,7 +783,7 @@ tb.addEventListener('click', async () => {
         dfuSeMemorySegments = [];
         clearDeviceInfo();
         addrRow.style.display = 'none';
-        db.disabled = true;
+        updateDownloadButtonState();
         tb.style.display = 'none';
         cb.textContent = '🔌 Reconnect to Device';
         cb.disabled = false;
@@ -583,11 +794,14 @@ tb.addEventListener('click', async () => {
 });
 
 fi.addEventListener('change', (event) => {
+    if (firmwareSourceMode !== 'upload') {
+        return;
+    }
+
     const file = event.target.files[0];
     if (file) {
         if (file.name.toLowerCase().endsWith('.dfu')) {
-            fw = null;
-            db.disabled = true;
+            clearLoadedFirmware();
             fi.value = '';
             log('❌ .dfu container files are not supported in this page. Please use a raw .bin firmware.', true);
             return;
@@ -599,25 +813,47 @@ fi.addEventListener('change', (event) => {
             fw = e.target.result;
             if (fw && fw.byteLength > 0) {
                 log('✅ Loaded: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + 'KB, ' + fw.byteLength + ' bytes)');
-                db.disabled = (dev === null || isRuntimeMode || needsReconnectAfterDetach);
+                updateDownloadButtonState();
             } else {
                 log('❌ Failed to load firmware file', true);
-                fw = null;
-                db.disabled = true;
+                clearLoadedFirmware();
             }
         };
         reader.onerror = () => {
             log('❌ Error reading firmware file', true);
-            fw = null;
-            db.disabled = true;
+            clearLoadedFirmware();
         };
         reader.readAsArrayBuffer(file);
     } else {
         // File input was cleared
-        fw = null;
-        db.disabled = true;
+        clearLoadedFirmware();
         log('⚠️ Firmware file cleared');
     }
+});
+
+fwSourceTabs.forEach(tab => {
+    tab.addEventListener('click', async () => {
+        const nextMode = tab.dataset.source;
+        if (!nextMode || nextMode === firmwareSourceMode) {
+            return;
+        }
+
+        setFirmwareSourceMode(nextMode);
+        if (firmwareSourceMode === 'fw-list') {
+            await loadFwManifest(true);
+            if (selectedFwPath && fw === null) {
+                await loadFirmwareFromFwList();
+            }
+        }
+    });
+});
+
+fwToggle.addEventListener('click', () => {
+    if (!Array.isArray(fwManifest) || fwManifest.length <= 3) {
+        return;
+    }
+    fwListExpanded = !fwListExpanded;
+    renderFwList();
 });
 
 db.addEventListener('click', async () => {
@@ -704,7 +940,7 @@ db.addEventListener('click', async () => {
                 }
             } catch (recoverErr) {
                 log('❌ Recovery failed: ' + recoverErr, true);
-                db.disabled = false;
+                updateDownloadButtonState();
                 pc.style.display = 'none';
                 return;
             }
@@ -712,7 +948,7 @@ db.addEventListener('click', async () => {
         
         if (!deviceReady) {
             log('❌ Device not ready for download', true);
-            db.disabled = false;
+            updateDownloadButtonState();
             pc.style.display = 'none';
             return;
         }
@@ -871,7 +1107,7 @@ db.addEventListener('click', async () => {
     } catch (error) {
         log('❌ Download failed: ' + error, true);
         log('💡 Try disconnecting and reconnecting the device', true);
-        db.disabled = false;
+        updateDownloadButtonState();
     }
 });
 
@@ -889,9 +1125,11 @@ if (navigator.usb) {
     // Clear any cached file selection on page load
     // This ensures fw variable matches the file input state
     if (fi.files.length === 0) {
-        fw = null;
-        db.disabled = true;
+        clearLoadedFirmware();
     }
+
+    setFirmwareSourceMode('fw-list');
+    loadFwManifest(false);
 } else {
     log('❌ WebUSB not supported', true);
     cb.disabled = true;

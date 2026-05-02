@@ -7,7 +7,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>WebUSB DFU Tool</title>
-    <link rel="stylesheet" href="styles.css?v=2.3">
+    <link rel="stylesheet" href="styles.css?v=2.5">
 </head>
 <body>
     <div id="theme-switcher">
@@ -28,8 +28,26 @@
         </div>
         <div style="display:flex;gap:16px;margin:16px 0">
             <div style="flex:1">
-                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">📦 Firmware File</label>
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">📦 Firmware Source</label>
+                <div id="fw-source-tabs" class="tab-row">
+                    <button type="button" class="fw-source-tab active" data-source="fw-list">Prebuild Firmware</button>
+                    <button type="button" class="fw-source-tab" data-source="upload">Upload Local</button>
+                </div>
+            </div>
+        </div>
+        <div id="upload-row" style="display:flex;gap:16px;margin:16px 0">
+            <div style="flex:1">
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">🗂️ Upload .bin</label>
                 <input type="file" id="f" accept=".bin" style="margin:0">
+            </div>
+        </div>
+        <div id="fw-row" style="display:none;gap:12px;margin:16px 0;align-items:end">
+            <div style="flex:1">
+                <label style="display:block;margin-bottom:8px;font-size:14px;color:#555">📚 Select fw File</label>
+                <div id="fw-list" class="fw-list">
+                    <div class="fw-empty">Loading firmware list...</div>
+                </div>
+                <button id="fw-toggle" type="button" class="fw-toggle" style="display:none">Show more</button>
             </div>
         </div>
         <button id="d" disabled>⬇️ Download Firmware</button>
@@ -44,8 +62,8 @@
         <div id="l"></div>
     </div>
     
-    <script src="dfu.js?v=2.3"></script>
-    <script src="dfuse.js?v=2.3"></script>
-    <script src="app.js?v=2.3"></script>
+    <script src="dfu.js?v=2.5"></script>
+    <script src="dfuse.js?v=2.5"></script>
+    <script src="app.js?v=2.5"></script>
 </body>
 </html>
