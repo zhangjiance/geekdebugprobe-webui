@@ -1,4 +1,4 @@
-var dev = null, fw = null, isDfuSe = false, isRuntimeMode = false, needsReconnectAfterDetach = false, dfuTransferSize = 0;
+var dev = null, fw = null, isDfuSe = false, isRuntimeMode = false, needsReconnectAfterDetach = false, dfuTransferSize = 0, dfuSeDefaultAddress = null, dfuSeMemorySegments = [];
 // USB DFU protocol values: 0x01=Runtime, 0x02=DFU mode (standard DFU or DFU-Se).
 const DFU_PROTOCOL_RUNTIME = 0x01;
 const DFU_PROTOCOL_DFU_MODE = 0x02;
@@ -14,6 +14,10 @@ const fi = document.getElementById('f');
 const ai = document.getElementById('a');
 const addrRow = document.getElementById('addr-row');
 const infoBox = document.getElementById('info');
+const eraseWrap = document.getElementById('p-erase');
+const eraseBar = document.getElementById('pe');
+const eraseFill = document.getElementById('be');
+const writeWrap = document.getElementById('p-write');
 const pc = document.getElementById('p');
 const pb = document.getElementById('b');
 const lg = document.getElementById('l');
@@ -36,13 +40,17 @@ function toHex(value, width) {
 }
 
 function decodeDfuSePermissions(tag) {
-    const c = String(tag || '').toLowerCase();
-    const value = (c >= 'a' && c <= 'g') ? (c.charCodeAt(0) - 96) : 0;
+    const bits = getDfuSePermissionBits(tag);
     const perms = [];
-    if (value & 0x01) perms.push('readable');
-    if (value & 0x02) perms.push('erasable');
-    if (value & 0x04) perms.push('writable');
+    if (bits & 0x01) perms.push('readable');
+    if (bits & 0x02) perms.push('erasable');
+    if (bits & 0x04) perms.push('writable');
     return perms.length ? perms.join(', ') : 'unknown';
+}
+
+function getDfuSePermissionBits(tag) {
+    const c = String(tag || '').toLowerCase();
+    return (c >= 'a' && c <= 'g') ? (c.charCodeAt(0) - 96) : 0;
 }
 
 function parseDfuSeMemoryMap(name) {
@@ -64,6 +72,8 @@ function parseDfuSeMemoryMap(name) {
     const segments = layout.split(',').map(x => x.trim()).filter(Boolean);
     let cursor = baseAddress;
     const ranges = [];
+    const parsedSegments = [];
+    let firstWritableStart = null;
 
     for (const segment of segments) {
         const m = segment.match(/^(\d+)\*(\d+)([BKM])([a-g])$/i);
@@ -79,16 +89,120 @@ function parseDfuSeMemoryMap(name) {
         const totalSize = count * sectorSize;
         const start = cursor;
         const end = cursor + totalSize - 1;
+        const permissionBits = getDfuSePermissionBits(tag);
+
         ranges.push(`0x${toHex(start, 8)}-0x${toHex(end, 8)} (${decodeDfuSePermissions(tag)})`);
+
+        parsedSegments.push({
+            start,
+            end: end + 1,
+            sectorSize,
+            readable: (permissionBits & 0x01) !== 0,
+            erasable: (permissionBits & 0x02) !== 0,
+            writable: (permissionBits & 0x04) !== 0
+        });
+
+        if (firstWritableStart === null && (permissionBits & 0x04)) {
+            firstWritableStart = start;
+        }
+
         cursor = end + 1;
     }
 
-    return { regionName, ranges };
+    return { regionName, ranges, segments: parsedSegments, firstWritableStart };
+}
+
+function getFirmwareVectorInfo(buffer) {
+    if (!buffer || buffer.byteLength < 8) {
+        return null;
+    }
+
+    const view = new DataView(buffer);
+    const stackPointer = view.getUint32(0, true);
+    const resetHandler = view.getUint32(4, true);
+    return { stackPointer, resetHandler };
+}
+
+function isLikelyArmStackPointer(value) {
+    // Typical Cortex-M SRAM region: 0x2000_0000 - 0x3FFF_FFFF.
+    return value >= 0x20000000 && value <= 0x3FFFFFFF;
+}
+
+function isAddressInsideImage(address, imageBase, imageSize) {
+    return address >= imageBase && address < (imageBase + imageSize);
 }
 
 function clearDeviceInfo() {
     infoBox.textContent = '';
     infoBox.style.display = 'none';
+}
+
+function resetProgressBars() {
+    if (eraseFill) {
+        eraseFill.style.width = '0%';
+        eraseFill.textContent = '0%';
+    }
+    if (pb) {
+        pb.style.width = '0%';
+        pb.textContent = '0%';
+    }
+}
+
+function setProgressVisibility(showErase) {
+    if (eraseWrap) {
+        eraseWrap.style.display = showErase ? 'block' : 'none';
+    }
+    if (writeWrap) {
+        writeWrap.style.display = 'block';
+    }
+}
+
+function updatePhaseProgress(phase, done, total) {
+    if (!total || total <= 0) {
+        return;
+    }
+
+    const pct = Math.min(100, Math.max(0, Math.round((done / total) * 100)));
+
+    if (phase === 'erase' && eraseFill) {
+        eraseFill.style.width = pct + '%';
+        eraseFill.textContent = pct + '%';
+        return;
+    }
+
+    if (pb) {
+        pb.style.width = pct + '%';
+        pb.textContent = pct + '%';
+    }
+}
+
+async function setReadyToReconnectState(message) {
+    if (dev && dev.device_ && dev.device_.opened) {
+        try {
+            await dev.close();
+        } catch (error) {
+            log('⚠️ Close warning: ' + formatErrorMessage(error));
+        }
+    }
+
+    dev = null;
+    isRuntimeMode = false;
+    isDfuSe = false;
+    dfuSeDefaultAddress = null;
+    dfuSeMemorySegments = [];
+    needsReconnectAfterDetach = false;
+
+    clearDeviceInfo();
+    addrRow.style.display = 'none';
+    tb.style.display = 'none';
+    tb.disabled = true;
+    db.disabled = true;
+    cb.textContent = '🔌 Reconnect to Device';
+    cb.disabled = false;
+
+    if (message) {
+        log(message);
+    }
 }
 
 function showDeviceInfo(device, selectedInterface, runtimeMode) {
@@ -193,6 +307,107 @@ async function readDfuFunctionalDescriptor(intfNumber) {
     }
 }
 
+async function readInterfaceStringDescriptor(device, stringIndex, langID) {
+    const GET_DESCRIPTOR = 0x06;
+    const DT_STRING = 0x03;
+
+    if (!stringIndex || stringIndex <= 0) {
+        return null;
+    }
+
+    const request = {
+        requestType: 'standard',
+        recipient: 'device',
+        request: GET_DESCRIPTOR,
+        value: (DT_STRING << 8) | stringIndex,
+        index: langID
+    };
+
+    const header = await device.controlTransferIn(request, 2);
+    if (header.status !== 'ok' || header.data.byteLength < 2) {
+        return null;
+    }
+
+    const totalLength = header.data.getUint8(0);
+    if (totalLength < 2) {
+        return null;
+    }
+
+    const full = await device.controlTransferIn(request, totalLength);
+    if (full.status !== 'ok' || full.data.byteLength < 2) {
+        return null;
+    }
+
+    const out = [];
+    for (let i = 2; i + 1 < full.data.byteLength; i += 2) {
+        out.push(full.data.getUint16(i, true));
+    }
+    return String.fromCharCode.apply(String, out);
+}
+
+async function readInterfaceNameFallback(usbDevice, configValue, intfNumber, altSetting) {
+    const GET_DESCRIPTOR = 0x06;
+    const DT_CONFIGURATION = 0x02;
+    const DT_INTERFACE = 0x04;
+
+    try {
+        const header = await usbDevice.controlTransferIn({
+            requestType: 'standard',
+            recipient: 'device',
+            request: GET_DESCRIPTOR,
+            value: (DT_CONFIGURATION << 8) | 0,
+            index: 0
+        }, 4);
+
+        if (header.status !== 'ok' || header.data.byteLength < 4) {
+            return null;
+        }
+
+        const totalLength = header.data.getUint16(2, true);
+        const full = await usbDevice.controlTransferIn({
+            requestType: 'standard',
+            recipient: 'device',
+            request: GET_DESCRIPTOR,
+            value: (DT_CONFIGURATION << 8) | 0,
+            index: 0
+        }, totalLength);
+
+        if (full.status !== 'ok' || full.data.byteLength < 9) {
+            return null;
+        }
+
+        const data = new DataView(full.data.buffer);
+        if (data.getUint8(5) !== configValue) {
+            return null;
+        }
+
+        let offset = 9;
+        while (offset + 2 <= data.byteLength) {
+            const bLength = data.getUint8(offset);
+            const bDescriptorType = data.getUint8(offset + 1);
+            if (bLength === 0 || offset + bLength > data.byteLength) {
+                break;
+            }
+
+            if (bDescriptorType === DT_INTERFACE && bLength >= 9) {
+                const dIntf = data.getUint8(offset + 2);
+                const dAlt = data.getUint8(offset + 3);
+                const iInterface = data.getUint8(offset + 8);
+                if (dIntf === intfNumber && dAlt === altSetting && iInterface > 0) {
+                    const name = await readInterfaceStringDescriptor(usbDevice, iInterface, 0x0409);
+                    return name || null;
+                }
+            }
+
+            offset += bLength;
+        }
+    } catch (error) {
+        return null;
+    }
+
+    return null;
+}
+
 async function connectDevice() {
     log('🔍 Requesting USB DFU device...');
     
@@ -224,9 +439,26 @@ async function connectDevice() {
         selectedInterface.protocol === DFU_PROTOCOL_DFU_MODE &&
         (nameHintDfuSe || knownVidPidDfuSe)
     );
-    
+
     dev = new dfu.Device(device, interfaces[0]);
     await dev.open();
+
+    if (!selectedInterface.name) {
+        const recoveredName = await readInterfaceNameFallback(
+            dev.device_,
+            cfgValue,
+            intfNumber,
+            altSetting
+        );
+        if (recoveredName) {
+            selectedInterface.name = recoveredName;
+            log('🔎 Recovered interface name from string descriptor: ' + recoveredName);
+        }
+    }
+
+    const parsedMap = parseDfuSeMemoryMap(selectedInterface.name);
+    dfuSeMemorySegments = parsedMap && Array.isArray(parsedMap.segments) ? parsedMap.segments : [];
+    dfuSeDefaultAddress = parsedMap && parsedMap.firstWritableStart !== null ? parsedMap.firstWritableStart : null;
 
     // Try to read transfer size from device, fall back to conservative default if unavailable
     dfuTransferSize = DEFAULT_TRANSFER_SIZE;
@@ -250,6 +482,15 @@ async function connectDevice() {
         log('⚠️ Failed to read DFU descriptor: ' + formatErrorMessage(error));
         log('ℹ️ Using default transferSize: ' + DEFAULT_TRANSFER_SIZE + ' bytes');
     }
+
+    const hasDfuSeMemoryMap = !!(parsedMap && Array.isArray(parsedMap.segments) && parsedMap.segments.length > 0);
+
+    if (isDfuSe && hasDfuSeMemoryMap && typeof dfuse !== 'undefined' && typeof dfuse.Device === 'function') {
+        const openedUsbDevice = dev.device_;
+        dev = new dfuse.Device(openedUsbDevice, interfaces[0]);
+    } else if (isDfuSe && !hasDfuSeMemoryMap) {
+        log('⚠️ DFU-Se memory map not available from interface descriptor. Falling back to generic DFU-Se flow with manual target address.');
+    }
     
     const vid_str = '0x' + device.vendorId.toString(16).padStart(4, '0').toUpperCase();
     const pid_str = '0x' + device.productId.toString(16).padStart(4, '0').toUpperCase();
@@ -258,6 +499,9 @@ async function connectDevice() {
     log('🔖 ' + (interfaces[0].name || '(unnamed)'));
     if (!isRuntimeMode) {
         log('🔎 DFU-Se hints: name=' + (nameHintDfuSe ? 'yes' : 'no') + ', version=' + (versionHintDfuSe ? 'yes' : 'no') + ', known-vidpid=' + (knownVidPidDfuSe ? 'yes' : 'no'));
+        if (isDfuSe && dfuSeDefaultAddress !== null) {
+            log('📍 Default target from memory map: 0x' + dfuSeDefaultAddress.toString(16).toUpperCase());
+        }
     }
     if (isRuntimeMode) {
         log('📋 Protocol: DFU Runtime');
@@ -269,6 +513,9 @@ async function connectDevice() {
     
     // Show address bar only for DFU-Se devices
     addrRow.style.display = (!isRuntimeMode && isDfuSe) ? 'flex' : 'none';
+    if (!isRuntimeMode && isDfuSe && dfuSeDefaultAddress !== null && !ai.value.trim()) {
+        ai.value = '0x' + dfuSeDefaultAddress.toString(16).toUpperCase();
+    }
     
     return device;
 }
@@ -321,6 +568,8 @@ tb.addEventListener('click', async () => {
         dev = null;
         isRuntimeMode = false;
         isDfuSe = false;
+        dfuSeDefaultAddress = null;
+        dfuSeMemorySegments = [];
         clearDeviceInfo();
         addrRow.style.display = 'none';
         db.disabled = true;
@@ -336,6 +585,14 @@ tb.addEventListener('click', async () => {
 fi.addEventListener('change', (event) => {
     const file = event.target.files[0];
     if (file) {
+        if (file.name.toLowerCase().endsWith('.dfu')) {
+            fw = null;
+            db.disabled = true;
+            fi.value = '';
+            log('❌ .dfu container files are not supported in this page. Please use a raw .bin firmware.', true);
+            return;
+        }
+
         log('🔄 Loading firmware file: ' + file.name + '...');
         const reader = new FileReader();
         reader.onload = (e) => {
@@ -386,7 +643,7 @@ db.addEventListener('click', async () => {
     
     let targetAddress = null;
     if (isDfuSe) {
-        targetAddress = 0x08002000;
+        targetAddress = (dfuSeDefaultAddress !== null) ? dfuSeDefaultAddress : 0x08002000;
         const addrStr = ai.value.trim();
         if (addrStr) {
             try {
@@ -398,12 +655,27 @@ db.addEventListener('click', async () => {
                 return void log('❌ Invalid target address: ' + addrStr, true);
             }
         }
+
+        const vectors = getFirmwareVectorInfo(fw);
+        if (vectors) {
+            const resetAddress = vectors.resetHandler & 0xFFFFFFFE;
+            const stackOk = isLikelyArmStackPointer(vectors.stackPointer);
+            const resetInImage = isAddressInsideImage(resetAddress, targetAddress, fw.byteLength);
+
+            if (!stackOk) {
+                return void log('❌ Firmware vector table looks invalid (initial SP not in SRAM). Confirm this is a Cortex-M .bin image.', true);
+            }
+
+            if (!resetInImage) {
+                return void log('❌ Reset vector 0x' + resetAddress.toString(16).toUpperCase() + ' is outside target image range [0x' + targetAddress.toString(16).toUpperCase() + ', 0x' + (targetAddress + fw.byteLength - 1).toString(16).toUpperCase() + ']. Target address is likely wrong.', true);
+            }
+        }
     }
     
     try {
         db.disabled = true;
-        pc.style.display = 'block';
-        pb.textContent = 'Preparing...';
+        resetProgressBars();
+        setProgressVisibility(isDfuSe);
         log('⚡ Starting firmware download...');
         if (isDfuSe) {
             log('📍 Target: 0x' + targetAddress.toString(16).toUpperCase());
@@ -497,17 +769,28 @@ db.addEventListener('click', async () => {
             return;
         }
         
-        dev.logInfo = msg => log(msg);
+        let progressPhase = isDfuSe ? 'erase' : 'write';
+        dev.logInfo = msg => {
+            log(msg);
+            const normalized = String(msg).toLowerCase();
+            if (normalized.includes('eras')) {
+                progressPhase = 'erase';
+            }
+            if (normalized.includes('copying data from browser to dfu device') ||
+                normalized.includes('starting dfu-se data transfer') ||
+                normalized.includes('starting data transfer')) {
+                progressPhase = 'write';
+            }
+            if (normalized.includes('manifest')) {
+                progressPhase = 'manifest';
+            }
+        };
         dev.logError = msg => log(msg, true);
         dev.logWarning = msg => log(msg);
         // dev.logDebug = msg => log('🐛 ' + msg);  // Uncomment for debugging
         dev.logDebug = msg => {};  // Disabled for cleaner output
         dev.logProgress = (done, total) => {
-            if (total) {
-                const pct = Math.round(done / total * 100);
-                pb.textContent = '📝 Writing ' + pct + '%';
-                pb.style.width = pct + '%';
-            }
+            updatePhaseProgress(progressPhase, done, total);
         };
         
         let transferSize = dfuTransferSize;
@@ -520,17 +803,36 @@ db.addEventListener('click', async () => {
         
         log('📦 Transfer size: ' + transferSize + ' bytes');
         log('📦 Firmware size: ' + fw.byteLength + ' bytes');
+
+        if (isDfuSe && typeof dev.startAddress !== 'undefined' && targetAddress !== null) {
+            dev.startAddress = targetAddress;
+        }
         
         let downloadCompleted = false;
         
         try {
             // Enable manifestationTolerant to wait for firmware installation
-            await dev.do_download(transferSize, fw, true, targetAddress);
+            const canUseNativeDfuSe = (
+                isDfuSe &&
+                typeof dfuse !== 'undefined' &&
+                (dev instanceof dfuse.Device) &&
+                dev.memoryInfo &&
+                Array.isArray(dev.memoryInfo.segments) &&
+                dev.memoryInfo.segments.length > 0
+            );
+
+            if (canUseNativeDfuSe) {
+                await dev.do_download(transferSize, fw, true);
+            } else {
+                await dev.do_download(transferSize, fw, true, targetAddress, isDfuSe ? dfuSeMemorySegments : null);
+            }
             downloadCompleted = true;
             log('✅ Firmware downloaded successfully!');
             log('🔄 Device is resetting...');
-            pb.style.width = '100%';
-            pb.textContent = '✅ Complete';
+            updatePhaseProgress('write', 100, 100);
+            if (isDfuSe) {
+                updatePhaseProgress('erase', 100, 100);
+            }
         } catch (innerError) {
             const err = innerError.toString();
             
@@ -545,18 +847,26 @@ db.addEventListener('click', async () => {
             if (isManifestError && isDisconnectError) {
                 log('✅ Firmware downloaded successfully!');
                 log('🔄 Device has reset (normal behavior)');
-                pb.style.width = '100%';
-                pb.textContent = '✅ Complete';
+                updatePhaseProgress('write', 100, 100);
+                if (isDfuSe) {
+                    updatePhaseProgress('erase', 100, 100);
+                }
                 downloadCompleted = true;
             } else if (downloadCompleted) {
                 // Download was marked complete but still got an error
                 log('✅ Download complete! Device has reset (normal behavior)');
-                pb.style.width = '100%';
-                pb.textContent = '✅ Complete';
+                updatePhaseProgress('write', 100, 100);
+                if (isDfuSe) {
+                    updatePhaseProgress('erase', 100, 100);
+                }
             } else {
                 // Real error during data transfer
                 throw innerError;
             }
+        }
+
+        if (downloadCompleted) {
+            await setReadyToReconnectState('✅ Ready for next flash. Reconnect device to download again.');
         }
     } catch (error) {
         log('❌ Download failed: ' + error, true);
@@ -566,6 +876,12 @@ db.addEventListener('click', async () => {
 });
 
 if (navigator.usb) {
+    navigator.usb.addEventListener('disconnect', async (event) => {
+        if (dev && dev.device_ && event.device === dev.device_) {
+            await setReadyToReconnectState('🔌 Device disconnected. Ready to reconnect.');
+        }
+    });
+
     log('✅ WebUSB ready');
     log('ℹ️ Supports standard DFU 1.1 and DFU-Se devices');
     log('ℹ️ Click "Connect" to start');
@@ -584,7 +900,9 @@ if (navigator.usb) {
 // Theme Switcher
 (function() {
     const themeButtons = document.querySelectorAll('.theme-btn');
+    const themeSwitcher = document.getElementById('theme-switcher');
     const htmlElement = document.documentElement;
+    let scrollFadeTimer = null;
     
     // Load saved theme or default to light
     const savedTheme = localStorage.getItem('theme') || 'light';
@@ -612,4 +930,20 @@ if (navigator.usb) {
             setTheme(this.dataset.theme);
         });
     });
+
+    window.addEventListener('scroll', () => {
+        if (!themeSwitcher) {
+            return;
+        }
+
+        themeSwitcher.classList.add('scrolling');
+        if (scrollFadeTimer !== null) {
+            clearTimeout(scrollFadeTimer);
+        }
+
+        scrollFadeTimer = setTimeout(() => {
+            themeSwitcher.classList.remove('scrolling');
+            scrollFadeTimer = null;
+        }, 180);
+    }, { passive: true });
 })();

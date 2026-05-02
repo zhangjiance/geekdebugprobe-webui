@@ -181,19 +181,32 @@ input:focus {
     box-shadow: 0 0 0 3px var(--focus-shadow);
 }
 
-#p, #l {
+#p-erase, #p-write, #l {
     display: none;
 }
 
+.progress-wrap {
+    margin: 12px 0;
+}
+
+.progress-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 0 0 6px;
+}
+
+#pe,
 #p {
     height: 36px;
     background: var(--progress-bg);
-    margin: 12px 0;
+    margin: 0;
     border-radius: 18px;
     overflow: hidden;
     box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
+#pe div,
 #p div {
     height: 100%;
     background: var(--progress-fill);
@@ -282,7 +295,11 @@ input:focus {
     display: flex;
     gap: 8px;
     z-index: 1000;
-    transition: background 0.3s ease, box-shadow 0.3s ease;
+    transition: background 0.3s ease, box-shadow 0.3s ease, opacity 0.2s ease;
+}
+
+#theme-switcher.scrolling {
+    opacity: 0.6;
 }
 
 .theme-btn {
@@ -321,6 +338,7 @@ input:focus {
 @media (max-width: 600px) {
     body {
         padding: 16px;
+        padding-top: calc(72px + env(safe-area-inset-top));
     }
 
     body > div:first-child {
@@ -328,15 +346,26 @@ input:focus {
     }
 
     #theme-switcher {
-        top: 10px;
+        top: calc(10px + env(safe-area-inset-top));
         right: 10px;
-        padding: 6px;
-        gap: 6px;
+        padding: 4px 6px;
+        gap: 4px;
+        border-radius: 16px;
+        background: color-mix(in srgb, var(--card-bg) 68%, transparent);
+        border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        box-shadow: 0 1px 6px var(--shadow);
     }
 
     .theme-btn {
-        width: 36px;
-        height: 36px;
-        font-size: 16px;
+        width: 30px;
+        height: 30px;
+        font-size: 13px;
+        line-height: 1;
+    }
+
+    .theme-btn:hover {
+        transform: none;
     }
 }

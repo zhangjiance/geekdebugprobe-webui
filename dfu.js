@@ -219,8 +219,31 @@ var dfu = {};
     dfu.Device.prototype.poll_until_idle = function(idle_state) {
         return this.poll_until(state => state == idle_state);
     };
+
+    function findDfuSeSegment(segments, addr) {
+        if (!Array.isArray(segments)) {
+            return null;
+        }
+
+        for (const segment of segments) {
+            if (segment.start <= addr && addr < segment.end) {
+                return segment;
+            }
+        }
+
+        return null;
+    }
+
+    function getDfuSeSectorStart(segment, addr) {
+        if (!segment || !segment.sectorSize || segment.sectorSize <= 0) {
+            return null;
+        }
+
+        const sectorIndex = Math.floor((addr - segment.start) / segment.sectorSize);
+        return segment.start + (sectorIndex * segment.sectorSize);
+    }
     
-    dfu.Device.prototype.do_download = async function(xfer_size, data, manifestationTolerant, targetAddress) {
+    dfu.Device.prototype.do_download = async function(xfer_size, data, manifestationTolerant, targetAddress, memorySegments) {
         let bytes_sent = 0;
         let expected_size = data.byteLength;
         let transaction = 0;
@@ -236,53 +259,7 @@ var dfu = {};
         
         this.logProgress(0, expected_size);
         
-        if (targetAddress !== null) {
-            this.logInfo("Sending ERASE command for address 0x" + targetAddress.toString(16).toUpperCase());
-            let eraseCmd = new ArrayBuffer(5);
-            let eraseCmdView = new DataView(eraseCmd);
-            eraseCmdView.setUint8(0, 0x41);
-            eraseCmdView.setUint32(1, targetAddress, true);
-            
-            try {
-                await this.download(eraseCmd, dfuSeCommandBlock);
-                this.logInfo("Waiting for erase to complete...");
-                let status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
-                if (status.status != dfu.STATUS_OK) {
-                    throw `DFU ERASE failed state=${status.state}, status=${status.status}`;
-                }
-                this.logInfo("✅ Erase completed");
-            } catch (error) {
-                throw "Error during DFU erase: " + error;
-            }
-        }
-        
-        if (targetAddress !== null) {
-            this.logInfo("Setting download address to 0x" + targetAddress.toString(16).toUpperCase());
-            let addrCmd = new ArrayBuffer(5);
-            let addrCmdView = new DataView(addrCmd);
-            addrCmdView.setUint8(0, 0x21);
-            addrCmdView.setUint32(1, targetAddress, true);
-            
-            try {
-                await this.download(addrCmd, dfuSeCommandBlock);
-                let status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
-                if (status.status != dfu.STATUS_OK) {
-                    throw `DFU SET_ADDRESS failed state=${status.state}, status=${status.status}`;
-                }
-                this.logDebug("✅ Address set successfully, device state: " + status.state);
-            } catch (error) {
-                throw "Error during DFU set address: " + error;
-            }
-        }
-        
-        // For DFU-Se, command packets are sent with block #0 and data starts from block #2.
-        // Standard DFU data starts from block #0.
-        transaction = (targetAddress !== null) ? 2 : 0;
-        if (targetAddress !== null) {
-            this.logInfo("Using DFU-Se protocol blocks: command=0, data starts at 2");
-        }
-        
-        // Verify device is still ready before starting data transfer
+        // Verify device is still ready before starting transfer.
         try {
             const preTransferState = await this.getState();
             this.logDebug("Pre-transfer device state: " + preTransferState);
@@ -292,35 +269,157 @@ var dfu = {};
         } catch (error) {
             this.logWarning("Could not verify pre-transfer state: " + error);
         }
-        
-        this.logInfo("📝 Starting data transfer...");
-        
-        while (bytes_sent < expected_size) {
-            const bytes_to_send = Math.min(expected_size - bytes_sent, xfer_size);
-            let bytes_written = 0;
-            let status;
-            
+
+        if (targetAddress !== null) {
+            this.logInfo("Using DFU-Se protocol blocks: command=0, data=2 with per-chunk address updates");
+
+            if (Array.isArray(memorySegments) && memorySegments.length > 0) {
+                const eraseStart = targetAddress;
+                const eraseEnd = targetAddress + expected_size;
+                const erasedSectors = new Set();
+
+                this.logInfo("Erasing DFU-Se sectors for target range...");
+                let eraseCursor = eraseStart;
+
+                while (eraseCursor < eraseEnd) {
+                    const segment = findDfuSeSegment(memorySegments, eraseCursor);
+                    if (!segment) {
+                        throw "Target address outside DFU-Se memory map at 0x" + eraseCursor.toString(16).toUpperCase();
+                    }
+
+                    if (!segment.erasable) {
+                        this.logWarning("Skipping non-erasable segment at 0x" + eraseCursor.toString(16).toUpperCase());
+                        eraseCursor = segment.end;
+                        continue;
+                    }
+
+                    const sectorStart = getDfuSeSectorStart(segment, eraseCursor);
+                    if (sectorStart === null) {
+                        throw "Invalid DFU-Se sector information near 0x" + eraseCursor.toString(16).toUpperCase();
+                    }
+
+                    if (!erasedSectors.has(sectorStart)) {
+                        let eraseCmd = new ArrayBuffer(5);
+                        let eraseCmdView = new DataView(eraseCmd);
+                        eraseCmdView.setUint8(0, 0x41);
+                        eraseCmdView.setUint32(1, sectorStart, true);
+
+                        try {
+                            await this.download(eraseCmd, dfuSeCommandBlock);
+                            let eraseStatus = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                            if (eraseStatus.status != dfu.STATUS_OK) {
+                                throw `DFU ERASE failed state=${eraseStatus.state}, status=${eraseStatus.status}`;
+                            }
+                        } catch (error) {
+                            throw "Error during DFU erase: " + error;
+                        }
+
+                        erasedSectors.add(sectorStart);
+                    }
+
+                    eraseCursor = Math.min(sectorStart + segment.sectorSize, segment.end);
+                }
+
+                this.logInfo("Erase completed for " + erasedSectors.size + " sector(s)");
+            } else {
+                this.logWarning("No DFU-Se memory map available; erasing only first target sector");
+                let eraseCmd = new ArrayBuffer(5);
+                let eraseCmdView = new DataView(eraseCmd);
+                eraseCmdView.setUint8(0, 0x41);
+                eraseCmdView.setUint32(1, targetAddress, true);
+
+                try {
+                    await this.download(eraseCmd, dfuSeCommandBlock);
+                    let eraseStatus = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                    if (eraseStatus.status != dfu.STATUS_OK) {
+                        throw `DFU ERASE failed state=${eraseStatus.state}, status=${eraseStatus.status}`;
+                    }
+                } catch (error) {
+                    throw "Error during DFU erase: " + error;
+                }
+            }
+
+            this.logInfo("📝 Starting DFU-Se data transfer...");
+            let address = targetAddress;
+
+            while (bytes_sent < expected_size) {
+                const bytes_to_send = Math.min(expected_size - bytes_sent, xfer_size);
+                let bytes_written = 0;
+                let status;
+
+                let addrCmd = new ArrayBuffer(5);
+                let addrCmdView = new DataView(addrCmd);
+                addrCmdView.setUint8(0, 0x21);
+                addrCmdView.setUint32(1, address, true);
+
+                try {
+                    await this.download(addrCmd, dfuSeCommandBlock);
+                    status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                    if (status.status != dfu.STATUS_OK) {
+                        throw `DFU SET_ADDRESS failed state=${status.state}, status=${status.status}`;
+                    }
+
+                    bytes_written = await this.download(data.slice(bytes_sent, bytes_sent + bytes_to_send), 2);
+                    status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                } catch (error) {
+                    this.logError("❌ Error at address 0x" + address.toString(16).toUpperCase() + ", offset " + bytes_sent + ": " + error);
+                    throw "Error during DFU-Se download: " + error;
+                }
+
+                if (status.status != dfu.STATUS_OK) {
+                    throw `DFU DOWNLOAD failed state=${status.state}, status=${status.status}`;
+                }
+
+                bytes_sent += bytes_written;
+                address += bytes_to_send;
+                this.logProgress(bytes_sent, expected_size);
+            }
+
+            // DfuSe manifestation is more reliable when start address is re-applied.
+            let startAddrCmd = new ArrayBuffer(5);
+            let startAddrCmdView = new DataView(startAddrCmd);
+            startAddrCmdView.setUint8(0, 0x21);
+            startAddrCmdView.setUint32(1, targetAddress, true);
             try {
-                bytes_written = await this.download(data.slice(bytes_sent, bytes_sent + bytes_to_send), transaction++);
-                status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                await this.download(startAddrCmd, dfuSeCommandBlock);
+                let status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                if (status.status != dfu.STATUS_OK) {
+                    throw `DFU SET_ADDRESS failed state=${status.state}, status=${status.status}`;
+                }
             } catch (error) {
-                this.logError("❌ Error at block #" + (transaction - 1) + ", offset " + bytes_sent + ": " + error);
-                throw "Error during DFU download: " + error;
+                throw "Error during DFU-Se manifestation setup: " + error;
             }
-            
-            if (status.status != dfu.STATUS_OK) {
-                throw `DFU DOWNLOAD failed state=${status.state}, status=${status.status}`;
+        } else {
+            transaction = 0;
+            this.logInfo("📝 Starting data transfer...");
+
+            while (bytes_sent < expected_size) {
+                const bytes_to_send = Math.min(expected_size - bytes_sent, xfer_size);
+                let bytes_written = 0;
+                let status;
+
+                try {
+                    bytes_written = await this.download(data.slice(bytes_sent, bytes_sent + bytes_to_send), transaction++);
+                    status = await this.poll_until_idle(dfu.dfuDNLOAD_IDLE);
+                } catch (error) {
+                    this.logError("❌ Error at block #" + (transaction - 1) + ", offset " + bytes_sent + ": " + error);
+                    throw "Error during DFU download: " + error;
+                }
+
+                if (status.status != dfu.STATUS_OK) {
+                    throw `DFU DOWNLOAD failed state=${status.state}, status=${status.status}`;
+                }
+
+                bytes_sent += bytes_written;
+                this.logProgress(bytes_sent, expected_size);
             }
-            
-            bytes_sent += bytes_written;
-            this.logProgress(bytes_sent, expected_size);
         }
         
         this.logInfo("✅ Data transfer complete: " + bytes_sent + " bytes written");
         
         try {
             this.logDebug("Sending zero-length packet to signal end of download...");
-            await this.download(new ArrayBuffer([]), transaction++);
+            await this.download(new ArrayBuffer([]), (targetAddress !== null) ? dfuSeCommandBlock : transaction++);
         } catch (error) {
             throw "Error during final DFU download: " + error;
         }
